@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Runtime state
+state/
+outputs/
+
+# Datasets
+datasets/
+*.log
+*.csv
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# Config with sensitive data
+config.json
+
+# OS
+.DS_Store
+Thumbs.db

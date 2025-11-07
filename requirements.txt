@@ -1,0 +1,15 @@
+# Log Parsing Agent Requirements
+# Core dependencies for the log parsing system
+
+# HTTP client for AIML API interactions
+requests>=2.31.0
+
+# Note: This project primarily uses Python standard library modules:
+# - argparse (CLI argument parsing)
+# - json (JSON processing)
+# - re (regex operations)
+# - pathlib (file path handling)
+# - dataclasses (data structures)
+# - collections (data structures)
+# - hashlib (template ID generation)
+# - typing (type hints)
