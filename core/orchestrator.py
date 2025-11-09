@@ -16,7 +16,7 @@ from agents.router_agent import RouterAgent, RoutingResult
 from libraries.template_library import TemplateLibraryManager, TemplateRecord
 from agents.timestamp_agent import TimestampAgent, TimestampSpec
 from agents.parsing_agent import ParsingAgent, ParsingOutcome
-from utils.json_payloads import ProcessedLogLine, preprocess_log_line
+from utils.preprocessing import ProcessedLogLine, preprocess_log_line
 from utils.template_validator import TemplateValidator, TemplateValidationResult
 from agents.template_refinement_agent import TemplateRefinementAgent
 from core.status_reporting import ConsoleStatusReporter
@@ -25,7 +25,7 @@ from core.template_learn_service import TemplateLearnService
 
 def _preprocess_batch_worker(lines_batch):
     """Worker: preprocess batch of raw log lines."""
-    from utils.json_payloads import preprocess_log_line
+    from utils.preprocessing import preprocess_log_line
     return [preprocess_log_line(line) for line in lines_batch]
 
 
@@ -56,7 +56,6 @@ def _process_batch_worker(args):
                     "template_id": tid,
                     "variables": m.groupdict(),
                     "raw": processed.raw,
-                    "json_payloads": [p.to_dict() for p in processed.payloads],
                 })
                 found = True
                 break
@@ -231,9 +230,7 @@ class LogParsingOrchestrator:
             if new_templates:
                 reparsed: List[Tuple[int, ProcessedLogLine]] = []
                 for idx, processed in unmatched:
-                    match = library.match(
-                        processed.transformed, payloads=processed.payloads
-                    )
+                    match = library.match(processed.transformed)
                     if match:
                         record, groups = match
                         if record.template_id not in template_examples:
@@ -244,9 +241,6 @@ class LogParsingOrchestrator:
                                 "template_id": record.template_id,
                                 "variables": groups,
                                 "raw": processed.raw,
-                                "json_payloads": [
-                                    payload.to_dict() for payload in processed.payloads
-                                ],
                             }
                         )
                     else:
@@ -266,9 +260,6 @@ class LogParsingOrchestrator:
                         "template_id": None,
                         "variables": {},
                         "raw": processed.raw,
-                        "json_payloads": [
-                            payload.to_dict() for payload in processed.payloads
-                        ],
                     }
                 )
 
@@ -324,15 +315,12 @@ class LogParsingOrchestrator:
 
     def _write_structured_output(self, path: Path, rows: List[Dict]) -> None:
         with path.open("w", encoding="utf-8", newline='') as handle:
-            handle.write("line\ttemplate_id\traw\tjson_payloads\n")
+            handle.write("line\ttemplate_id\traw\n")
             for row in tqdm(sorted(rows, key=lambda x: x['line_number']), desc="Writing TSV", unit="line", disable=len(rows) < 10000):
                 line_num = row['line_number']
                 template_id = row.get('template_id') or ''
                 raw = row.get('raw', '').replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
-                payloads_str = ''
-                if row.get('json_payloads'):
-                    payloads_str = json.dumps(row['json_payloads'], ensure_ascii=False)
-                handle.write(f"{line_num}\t{template_id}\t{raw}\t{payloads_str}\n")
+                handle.write(f"{line_num}\t{template_id}\t{raw}\n")
 
     def _write_template_snapshot(self, path: Path, library) -> None:
         data = {

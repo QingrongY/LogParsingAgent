@@ -7,7 +7,7 @@ import re
 from typing import List, Optional
 
 from agents.base_agent import BaseAgent
-from utils.json_payloads import ProcessedLogLine
+from utils.preprocessing import ProcessedLogLine
 from agents.parsing_agent import ParsingAgent
 from agents.router_agent import RoutingResult
 from libraries.template_library import TemplateRecord

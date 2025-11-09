@@ -14,7 +14,7 @@ from agents.router_agent import RoutingResult
 from agents.timestamp_agent import TimestampSpec
 from core.status_reporting import ConsoleStatusReporter
 from libraries.template_library import TemplateLibrary, TemplateRecord
-from utils.json_payloads import ProcessedLogLine
+from utils.preprocessing import ProcessedLogLine
 from utils.template_validator import TemplateValidator, TemplateValidationResult
 
 
@@ -86,9 +86,7 @@ class TemplateLearnService:
             last_resolution_note: Optional[str] = None
 
             # Skip if already matched by an existing or newly learned template
-            existing_match = library.match(
-                processed_line.transformed, payloads=processed_line.payloads
-            )
+            existing_match = library.match(processed_line.transformed)
             if existing_match:
                 remaining.pop(line_number, None)
                 attempted.discard(line_number)
@@ -348,10 +346,7 @@ class TemplateLearnService:
                 if previous_id != new_id:
                     template_examples.pop(previous_id, None)
                 template_examples.setdefault(new_id, processed_line)
-                match_after_store = library.match(
-                    processed_line.transformed,
-                    payloads=processed_line.payloads,
-                )
+                match_after_store = library.match(processed_line.transformed)
                 if match_after_store:
                     stored_record, groups = match_after_store
                     matched_entries.append(
@@ -360,9 +355,6 @@ class TemplateLearnService:
                             "template_id": stored_record.template_id,
                             "variables": groups,
                             "raw": processed_line.raw,
-                            "json_payloads": [
-                                payload.to_dict() for payload in processed_line.payloads
-                            ],
                         }
                     )
                 detail_parts = [f"template {new_id}"]

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Dict, List
 
-from utils.json_payloads import ProcessedLogLine
+from utils.preprocessing import ProcessedLogLine
 from libraries.template_library import TemplateRecord
 
 

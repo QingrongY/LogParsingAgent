@@ -49,8 +49,7 @@ python cli.py /path/to/logfile.log --output-dir ./results
 
 ## Output
 
-- `*.parsed.json`: Structured parsing results with extracted variables
-- Each record includes a `json_payloads` array detailing placeholder-bound payloads, extracted keys, and normalized JSON (when available)
+- `*.parsed.tsv`: Structured parsing results with extracted variables
 - `*.templates.json`: Learned templates with metadata
 
 ## Example

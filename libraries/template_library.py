@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from utils.json_payloads import JsonPayload
 
 
 @dataclass
@@ -25,7 +24,6 @@ class TemplateRecord:
     notes: str = ""
     version: str = "v1"
     is_active: bool = True
-    json_placeholders: Dict[str, Dict[str, object]] = field(default_factory=dict)
 
     def get_variable_names(self) -> List[str]:
         try:
@@ -56,7 +54,6 @@ class TemplateRecord:
             notes=payload.get("notes", ""),
             version=payload.get("version", "v1"),
             is_active=payload.get("is_active", True),
-            json_placeholders=payload.get("json_placeholders", {}),
         )
 
 
@@ -106,8 +103,6 @@ class TemplateLibrary:
     def match(
         self,
         line: str,
-        *,
-        payloads: Optional[List[JsonPayload]] = None,
     ) -> Optional[Tuple[TemplateRecord, Dict[str, str]]]:
         """Try to match a log line against known templates."""
         for template_id, record in self.templates.items():
@@ -124,27 +119,6 @@ class TemplateLibrary:
             if match:
                 record.usage_count += 1
                 self._dirty_since_save = True
-                if payloads:
-                    updated = False
-                    for payload in payloads:
-                        info = record.json_placeholders.setdefault(
-                            payload.placeholder,
-                            {
-                                "owner": payload.owner,
-                                "keys": list(payload.key_paths),
-                            },
-                        )
-                        if payload.owner and not info.get("owner"):
-                            info["owner"] = payload.owner
-                            updated = True
-                        if payload.key_paths:
-                            existing_keys = set(info.get("keys", []))
-                            new_keys = set(payload.key_paths)
-                            if new_keys - existing_keys:
-                                info["keys"] = sorted(existing_keys | new_keys)
-                                updated = True
-                    if updated:
-                        self._dirty_since_save = True
                 return record, match.groupdict()
         return None
 

@@ -15,7 +15,7 @@ from agents.base_agent import BaseAgent
 from agents.router_agent import RoutingResult
 from libraries.template_library import TemplateRecord
 from agents.timestamp_agent import TimestampSpec
-from utils.json_payloads import ProcessedLogLine
+from utils.preprocessing import ProcessedLogLine
 
 
 @dataclass
@@ -107,12 +107,12 @@ class ParsingAgent(BaseAgent):
             )
 
         system_prompt = (
-            "You are a log parsing expert. Distinguish between:\n\n"
-            "TYPE 1 - BUSINESS DATA (Variables): Instance-specific, unbounded values\n"
-            "  • Timestamps, IPs, MACs, usernames, device names, IDs, metrics, paths, messages\n"
+            "You are a log parsing expert. Your task is distinguish all BUSINESS DATA and extract a unified log template:\n\n"
+            "BUSINESS DATA (Variables): Instance-specific, unbounded values\n"
+            "  • Timestamps, IPs, MACs, usernames, device names, IDs, metrics, paths\n"
             "  • Capture as: (?P<name>.*?)\n"
             "  • Criteria: Unbounded domain, externally determined, substitution doesn't change event type\n\n"
-            "TYPE 2 - STRUCTURE (Constants): System-defined, finite value sets\n"
+            "STRUCTURE (Constants) - NOT BUSINESS DATA: System-defined, finite value sets\n"
             "  • Event skeletons: 'connected', 'timeout', 'sent deauth', 'failed to connect'\n"
             "  • Log levels: INFO, WARN, ERROR, DEBUG\n"
             "  • Protocol keywords: GET, POST, TCP, UDP, deauth, disassoc\n"
@@ -120,26 +120,28 @@ class ParsingAgent(BaseAgent):
             "  • Syntactic markers: from, to, by, at, delimiters like :, |, =\n"
             "  • Keep as literal text in regex\n"
             "  • Criteria: Finite set, system-defined, changing it changes event semantics\n\n"
-            "Decision Rule:\n"
-            "  1. Can enumerate all values? YES→constant, NO→variable\n"
-            "  2. Does changing it alter event type? YES→constant, NO→variable\n"
-            "  3. When uncertain: prefer constant (short phrases ≤3 words are usually structural)\n\n"
-            "Examples:\n"
-            "  Input: '2024-01-01 10:00:00 User alice connected from 192.168.1.100'\n"
-            "  Output: '(?P<ts>.*?) User (?P<user>.*?) connected from (?P<ip>.*?)'\n"
-            "  Constants: User, connected, from | Variables: ts, user, ip\n\n"
-            "  Input: 'Oct 29 13:04:23 AP-403 mdns[1234]: AP sent deauth to sta 00:1A:2B:3C:4D:5E'\n"
-            "  Output: '(?P<ts>.*?) (?P<ap>.*?) mdns\\[(?P<pid>.*?)\\]: AP sent deauth to sta (?P<mac>.*?)'\n"
-            "  Constants: mdns, AP sent deauth to sta | Variables: ts, ap, pid, mac\n\n"
-            "Return JSON:\n"
+            "Requirements:\n"
+            "  • Use ONLY .*? for ALL content matching. Do not use \d+, \w+, [0-9]+, [a-zA-Z]+ or any other specific character classes\n"
+            "  • The template must fully match the entire log\n"
+            # "  • Escape regex special chars in constants: [ ] ( ) { } . * + ? ^ $ \\ |\n"
+            "  • If you see JSON objects, capture them as a single variable without parsing internals\n\n"
+            # "  • Return only valid JSON\n\n"
+            # "Decision Rule:\n"
+            # "  1. Can enumerate all values? YES→constant, NO→variable\n"
+            # "  2. Does changing it alter event type? YES→constant, NO→variable\n"
+            # "  3. When uncertain: prefer constant (short phrases ≤3 words are usually structural)\n\n"
+            # "Examples:\n"
+            # "  Input: '2024-01-01 10:00:00 User alice connected from 192.168.1.100'\n"
+            # "  Output: '(?P<ts>.*?) User (?P<user>.*?) connected from (?P<ip>.*?)'\n"
+            # "  Constants: User, connected, from | Variables: ts, user, ip\n\n"
+            # "  Input: 'Oct 29 13:04:23 AP-403 mdns[1234]: AP sent deauth to sta 00:1A:2B:3C:4D:5E'\n"
+            # "  Output: '(?P<ts>.*?) (?P<ap>.*?) mdns\\[(?P<pid>.*?)\\]: AP sent deauth to sta (?P<mac>.*?)'\n"
+            # "  Constants: mdns, AP sent deauth to sta | Variables: ts, ap, pid, mac\n\n"
+            "Return exactly this json format:\n"
             "{\n"
             '  "reasoning": "<brief explanation>",\n'
             '  "regex": "<regex with (?P<name>.*?) for ALL variables>"\n'
-            "}\n\n"
-            "Requirements:\n"
-            "  • Use ONLY (?P<name>.*?) for variables, no \\d+, \\w+, [0-9]\n"
-            "  • Escape regex special chars in constants: [ ] ( ) { } . * + ? ^ $ \\ |\n"
-            "  • Return only valid JSON, no markdown\n"
+            "}\n"
         )
 
         # Build context information
@@ -257,7 +259,6 @@ class ParsingAgent(BaseAgent):
         constants = self._extract_constants(template_text)
 
         template_id = self._make_template_id(template_text, routing)
-        payload_summary = self._summarize_payloads(samples)
 
         record = TemplateRecord(
             template_id=template_id,
@@ -268,7 +269,6 @@ class ParsingAgent(BaseAgent):
             timestamp_hint=timestamp_spec.to_dict() if timestamp_spec else None,
             source="llm",
             notes=reasoning[:200] if reasoning else "",  # Store reasoning in notes
-            json_placeholders=payload_summary,
         )
 
         self.last_error = ""
@@ -279,37 +279,6 @@ class ParsingAgent(BaseAgent):
             new_terms=new_terms,
             raw_response=raw_response,
         )
-
-    def _summarize_payloads(
-        self, samples: List[ProcessedLogLine]
-    ) -> Dict[str, Dict[str, object]]:
-        summary: Dict[str, Dict[str, object]] = {}
-        key_sets: Dict[str, Set[str]] = {}
-
-        for sample in samples:
-            for payload in sample.payloads:
-                info = summary.setdefault(
-                    payload.placeholder,
-                    {"owner": payload.owner, "keys": []},
-                )
-                if payload.owner and not info.get("owner"):
-                    info["owner"] = payload.owner
-                if payload.key_paths:
-                    key_set = key_sets.setdefault(
-                        payload.placeholder,
-                        set(info.get("keys", [])),
-                    )
-                    previous_size = len(key_set)
-                    key_set.update(payload.key_paths)
-                    if len(key_set) != previous_size or not info.get("keys"):
-                        info["keys"] = sorted(key_set)
-
-        for placeholder, info in summary.items():
-            if placeholder in key_sets:
-                info["keys"] = sorted(key_sets[placeholder])
-            elif "keys" not in info or info["keys"] is None:
-                info["keys"] = []
-        return summary
 
     def _extract_constants(self, template: str) -> List[str]:
         """Extract constant text segments from template."""
@@ -417,19 +386,25 @@ class ParsingAgent(BaseAgent):
             "   This merges multiple overly-specific templates into one properly generalized template.\n"
             "   WARNING: Only use this when the captured position is truly a BUSINESS VARIABLE (unbounded instance data like IPs, MACs, usernames, IDs).\n"
             "   Do NOT merge if you are capturing STRUCTURAL CONSTANTS (event keywords, operation names, module names) as variables.\n\n"
+            "   Return JSON:\n"
+            "{\n"
+            '  "reasoning": "explanation of why this decision is correct",\n'
+            '  "decision": "replace_conflicting",\n'
+            '  "new_regex": "the regex to use (candidate as-is)",\n'
+            '  "replaced_ids": ["template_id1", "template_id2"]  // ONLY for replace_conflicting, list all conflicting template IDs; empty array otherwise\n'
+            "}\n"
+
 
             "2. refine_candidate:\n"
             "   Use when the candidate template is overly generalized, capturing structural constants as variables.\n"
             "   Example: Candidate has (?P<message>.*?) capturing entire message content, while conflicting templates parse specific event structures.\n"
             "   Result: Adjust the candidate regex to be more specific (add distinguishing structural constants) so it doesn't conflict.\n"
             "   This maintains template independence by making the overly-broad regex more specific.\n\n"
-
-            "Return JSON:\n"
+            "   Return JSON:\n"
             "{\n"
             '  "reasoning": "explanation of why this decision is correct",\n'
-            '  "decision": "replace_conflicting" | "refine_candidate",\n'
-            '  "new_regex": "the regex to use (candidate as-is for replace_conflicting, or refined for refine_candidate)",\n'
-            '  "replaced_ids": ["template_id1", "template_id2"]  // ONLY for replace_conflicting, list all conflicting template IDs; empty array otherwise\n'
+            '  "decision": "refine_candidate",\n'
+            '  "new_regex": "the new more specific regex to use",\n'
             "}\n"
             "Respond with JSON only."
         )
