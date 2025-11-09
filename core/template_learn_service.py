@@ -492,8 +492,9 @@ class TemplateLearnService:
                 detail=None,
             )
 
+        new_regex = plan.get("new_regex", "")
         new_outcome = self.parsing_agent.build_outcome_from_regex(
-            regex=plan.get("new_regex", ""),
+            regex=new_regex,
             sample=processed_line,
             routing=routing,
             timestamp_spec=timestamp_spec,
@@ -535,9 +536,33 @@ class TemplateLearnService:
             return new_record, validation, False, status_note
 
         # decision == "refine_candidate"
+        self.reporter.emit(
+            "resolution_refine",
+            line_number=line_number,
+            message=f"refined regex",
+            detail=new_regex,
+            severity="info",
+        )
         validation = template_validator.validate(
             new_record,
             candidate_sample=processed_line,
         )
+        if validation.is_valid:
+            self.reporter.emit(
+                "resolution_refine",
+                line_number=line_number,
+                message="validation passed",
+                detail=f"new template_id: {new_record.template_id}",
+                severity="success",
+            )
+        else:
+            conflict_msg = ", ".join(validation.conflicting_template_ids) if validation.conflicting_template_ids else "unknown"
+            self.reporter.emit(
+                "resolution_refine",
+                line_number=line_number,
+                message="validation failed",
+                detail=f"still conflicts with: {conflict_msg}",
+                severity="warning",
+            )
         status_note = "refined candidate to avoid conflicts"
         return new_record, validation, False, status_note
