@@ -13,8 +13,6 @@ from utils.json_payloads import JsonPayload
 
 @dataclass
 class TemplateRecord:
-    """Serializable representation of a template with metadata."""
-
     template_id: str
     template: str
     regex: str
@@ -29,8 +27,18 @@ class TemplateRecord:
     is_active: bool = True
     json_placeholders: Dict[str, Dict[str, object]] = field(default_factory=dict)
 
+    def get_variable_names(self) -> List[str]:
+        try:
+            compiled = re.compile(self.regex)
+            return list(compiled.groupindex.keys())
+        except re.error:
+            return []
+
     def to_dict(self) -> Dict:
         data = asdict(self)
+        data.pop('template', None)
+        data.pop('variables', None)
+        data.pop('constants', None)
         return data
 
     @staticmethod
@@ -219,7 +227,6 @@ class TemplateLibrary:
         return removed
 
     def list_templates(self) -> List[Dict]:
-        """Return serialized template definitions."""
         return [record.to_dict() for record in self.templates.values()]
 
     # ------------------------------------------------------------------ #

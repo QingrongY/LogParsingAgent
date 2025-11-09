@@ -121,15 +121,15 @@ class ConflictResolutionAgent(BaseAgent):
             if timestamp_spec
             else ""
         )
-        group_names = ", ".join(var["name"] for var in candidate_record.variables) or "none"
+        var_names = candidate_record.get_variable_names()
+        group_names = ", ".join(var_names) if var_names else "none"
 
         conflicts_blob = "\n".join(
             [
                 (
                     f"- template_id: {record.template_id}\n"
                     f"  regex: {record.regex}\n"
-                    f"  template: {record.template}\n"
-                    f"  variables: {[var['name'] for var in record.variables]}\n"
+                    f"  capture_groups: {', '.join(record.get_variable_names())}\n"
                     f"  example_transformed: {sample.transformed}\n"
                     f"  example_raw: {sample.raw}"
                 )
@@ -159,7 +159,7 @@ class ConflictResolutionAgent(BaseAgent):
             "Rules:\n"
             "  • BUSINESS DATA (variables): Instance-specific unbounded values (timestamps, IPs, MACs, usernames, IDs, paths).\n"
             "    Capture with (?P<name>.*?)\n"
-            "  • STRUCTURE (constants): System-defined phrases that determine event type (log levels, event verbs, module names, keywords).\n"
+            "  • STRUCTURE (constants): System-defined phrases that determine event type (log levels, event verbs, module names, keywords, messages).\n"
             "    Keep literal and escape regex metacharacters.\n"
             "  • When choosing replace_conflicting, the candidate regex must match all conflicting template examples.\n"
             "  • When choosing refine_candidate, add structural constants to distinguish the candidate from conflicting templates.\n\n"
@@ -181,11 +181,9 @@ class ConflictResolutionAgent(BaseAgent):
             f"{ts_hint}"
             "Candidate template:\n"
             f"  regex: {candidate_record.regex}\n"
-            f"  template: {candidate_record.template}\n"
-            f"  variables: {[var['name'] for var in candidate_record.variables]}\n"
+            f"  capture_groups: {group_names}\n"
             f"  example_transformed: {candidate_sample.transformed}\n"
-            f"  example_raw: {candidate_sample.raw}\n"
-            f"  required_capture_groups: {group_names}\n\n"
+            f"  example_raw: {candidate_sample.raw}\n\n"
             "Conflicting templates:\n"
             f"{conflicts_blob}\n\n"
             f"{issues_section}"

@@ -55,8 +55,30 @@ class BaseAgent:
         """Extract JSON from LLM response text."""
         try:
             cleaned = text.strip()
+
+            # Remove markdown code blocks if present
+            if "```json" in cleaned:
+                cleaned = re.sub(r"```json\s*", "", cleaned)
+                cleaned = re.sub(r"```\s*$", "", cleaned)
+                cleaned = cleaned.strip()
+            elif "```" in cleaned:
+                cleaned = re.sub(r"```\s*", "", cleaned)
+                cleaned = cleaned.strip()
+
+            # If it's a JSON array, try to get the first element
+            if cleaned.startswith("["):
+                try:
+                    array = json.loads(cleaned)
+                    if isinstance(array, list) and len(array) > 0 and isinstance(array[0], dict):
+                        return array[0]
+                except json.JSONDecodeError:
+                    pass
+
+            # Try direct parsing
             if cleaned.startswith("{"):
                 return json.loads(cleaned)
+
+            # Search for JSON object
             match = re.search(r"\{.*\}", cleaned, re.DOTALL)
             if match:
                 return json.loads(match.group())

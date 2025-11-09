@@ -516,6 +516,7 @@ class TemplateLearnService:
                 if template_id in library.templates:
                     library.templates[template_id].is_active = False
                     library._dirty_since_save = True
+                    template_examples.pop(template_id, None)
                     self.reporter.emit(
                         "resolution_merge",
                         line_number=line_number,

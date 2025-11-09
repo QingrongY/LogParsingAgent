@@ -44,8 +44,10 @@ class RouterAgent(BaseAgent):
         system_prompt = "You are a precise classifier. Respond with JSON only."
         user_prompt = (
             "You are a log routing specialist. "
-            "Classify the following log samples and respond with strict JSON:\n"
-            '{"device_type": "<category>", "vendor": "<vendor>", "reasoning": "<brief reasoning>"}\n'
+            "Analyze the following log samples and classify the OVERALL log source. "
+            "All samples are from the SAME device/system. "
+            "Respond with a SINGLE JSON object (not an array):\n"
+            '{"device_type": "<category>", "vendor": "<vendor>", "reasoning": "<brief reasoning>"}\n\n'
             "Allowed device_type values: wifi_router, wifi_network, firewall, "
             "switch, application, mobile_device, server, storage, security, unknown.\n"
             "Vendor examples: aruba, ubiquiti, cisco, meraki, palo_alto, apple, android, generic, unknown.\n"

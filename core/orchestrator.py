@@ -285,7 +285,7 @@ class LogParsingOrchestrator:
         library.save_if_dirty()
 
         # Persist results
-        structured_output = output_dir / f"{log_path.stem}.parsed.json"
+        structured_output = output_dir / f"{log_path.stem}.parsed.tsv"
         template_snapshot = output_dir / f"{log_path.stem}.templates.json"
 
         self.reporter.emit("progress", line_number=None, message="Writing results to disk...", detail=None)
@@ -332,41 +332,16 @@ class LogParsingOrchestrator:
         return spec
 
     def _write_structured_output(self, path: Path, rows: List[Dict]) -> None:
-        # Group by template_id (rows already mostly sorted by parallel processing)
-        grouped: "OrderedDict[Optional[str], List[Dict]]" = OrderedDict()
-        for row in tqdm(rows, desc="Grouping results", unit="line", disable=len(rows) < 10000):
-            template_id = row.get("template_id")
-            bucket = grouped.setdefault(template_id, [])
-            bucket.append(
-                {
-                    "line_number": row["line_number"],
-                    "variables": row.get("variables", {}),
-                    "raw": row.get("raw", ""),
-                    "json_payloads": row.get("json_payloads", []),
-                }
-            )
-
-        def sort_key(item: Tuple[Optional[str], List[Dict]]) -> Tuple[int, str]:
-            template_id, _ = item
-            if template_id is None:
-                return (1, "")
-            return (0, template_id)
-
-        # Write JSON in chunks to avoid large memory allocation
-        sorted_groups = sorted(grouped.items(), key=sort_key)
-        with path.open("w", encoding="utf-8") as handle:
-            handle.write('[')
-            first = True
-            for template_id, entries in tqdm(sorted_groups, desc="Writing JSON", unit="template"):
-                if not first:
-                    handle.write(',')
-                first = False
-                json.dump(
-                    {"template_id": template_id, "logs": entries},
-                    handle,
-                    ensure_ascii=False
-                )
-            handle.write(']')
+        with path.open("w", encoding="utf-8", newline='') as handle:
+            handle.write("line\ttemplate_id\traw\tjson_payloads\n")
+            for row in tqdm(sorted(rows, key=lambda x: x['line_number']), desc="Writing TSV", unit="line", disable=len(rows) < 10000):
+                line_num = row['line_number']
+                template_id = row.get('template_id') or ''
+                raw = row.get('raw', '').replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
+                payloads_str = ''
+                if row.get('json_payloads'):
+                    payloads_str = json.dumps(row['json_payloads'], ensure_ascii=False)
+                handle.write(f"{line_num}\t{template_id}\t{raw}\t{payloads_str}\n")
 
     def _write_template_snapshot(self, path: Path, library) -> None:
         data = {
@@ -375,4 +350,4 @@ class LogParsingOrchestrator:
             "templates": library.list_templates(),
         }
         with path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+            json.dump(data, f, ensure_ascii=False, indent=2)

@@ -96,7 +96,8 @@ class TemplateRefinementAgent(BaseAgent):
             else ""
         )
         issues_block = "\n".join(f"- {issue}" for issue in issues)
-        group_names = ", ".join(var["name"] for var in candidate_record.variables) or "none"
+        var_names = candidate_record.get_variable_names()
+        group_names = ", ".join(var_names) if var_names else "none"
 
         instructions = (
             "Refine the candidate template so it satisfies all validator issues.\n"
@@ -120,11 +121,9 @@ class TemplateRefinementAgent(BaseAgent):
             f"{issues_block}\n\n"
             "Candidate template:\n"
             f"  regex: {candidate_record.regex}\n"
-            f"  template: {candidate_record.template}\n"
-            f"  variables: {[var['name'] for var in candidate_record.variables]}\n"
+            f"  capture_groups: {group_names}\n"
             f"  example_transformed: {candidate_sample.transformed}\n"
-            f"  example_raw: {candidate_sample.raw}\n"
-            f"  required_capture_groups: {group_names}\n\n"
+            f"  example_raw: {candidate_sample.raw}\n\n"
             f"{instructions}"
         )
 
