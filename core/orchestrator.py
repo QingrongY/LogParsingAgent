@@ -18,7 +18,6 @@ from agents.timestamp_agent import TimestampAgent, TimestampSpec
 from agents.parsing_agent import ParsingAgent, ParsingOutcome
 from utils.preprocessing import ProcessedLogLine, preprocess_log_line
 from utils.template_validator import TemplateValidator, TemplateValidationResult
-from agents.template_refinement_agent import TemplateRefinementAgent
 from core.status_reporting import ConsoleStatusReporter
 from core.template_learn_service import TemplateLearnService
 
@@ -107,14 +106,9 @@ class LogParsingOrchestrator:
         self.parsing_agent = ParsingAgent(
             api_client=self.api_client,
         )
-        self.refinement_agent = TemplateRefinementAgent(
-            api_client=self.api_client,
-            parsing_agent=self.parsing_agent,
-        )
         self.reporter = ConsoleStatusReporter()
         self.learn_service = TemplateLearnService(
             parsing_agent=self.parsing_agent,
-            refinement_agent=self.refinement_agent,
             reporter=self.reporter,
         )
         self.progress_interval = max(progress_interval, 1)

@@ -19,7 +19,6 @@ This system uses LLM agents to make this distinction semantically, not heuristic
 - **JSONPayloadPreprocessor**: Detects inline JSON-like payloads, replaces them with placeholders, and captures structured key metadata for downstream processing
 - **TemplateValidator**: Performs conflict checks before new templates enter the library
 - **ConflictResolutionAgent**: Resolves template conflicts
-- **TemplateRefinementAgent**: Refines templates to meet validation requirements
 
 ### Key Components
 - **TemplateLibrary**: Persistent storage of learned templates per device/vendor

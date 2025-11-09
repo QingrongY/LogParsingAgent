@@ -106,43 +106,7 @@ class ParsingAgent(BaseAgent):
                 f"and format {timestamp_spec.format}. "
             )
 
-        system_prompt = (
-            "You are a log parsing expert. Your task is distinguish all BUSINESS DATA and extract a unified log template:\n\n"
-            "BUSINESS DATA (Variables): Instance-specific, unbounded values\n"
-            "  • Timestamps, IPs, MACs, usernames, device names, IDs, metrics, paths\n"
-            "  • Capture as: (?P<name>.*?)\n"
-            "  • Criteria: Unbounded domain, externally determined, substitution doesn't change event type\n\n"
-            "STRUCTURE (Constants) - NOT BUSINESS DATA: System-defined, finite value sets\n"
-            "  • Event skeletons: 'connected', 'timeout', 'sent deauth', 'failed to connect'\n"
-            "  • Log levels: INFO, WARN, ERROR, DEBUG\n"
-            "  • Protocol keywords: GET, POST, TCP, UDP, deauth, disassoc\n"
-            "  • Module names: kernel, sshd, mdns (Note: PIDs are variables)\n"
-            "  • Syntactic markers: from, to, by, at, delimiters like :, |, =\n"
-            "  • Keep as literal text in regex\n"
-            "  • Criteria: Finite set, system-defined, changing it changes event semantics\n\n"
-            "Requirements:\n"
-            "  • Use ONLY .*? for ALL content matching. Do not use \d+, \w+, [0-9]+, [a-zA-Z]+ or any other specific character classes\n"
-            "  • The template must fully match the entire log\n"
-            # "  • Escape regex special chars in constants: [ ] ( ) { } . * + ? ^ $ \\ |\n"
-            "  • If you see JSON objects, capture them as a single variable without parsing internals\n\n"
-            # "  • Return only valid JSON\n\n"
-            # "Decision Rule:\n"
-            # "  1. Can enumerate all values? YES→constant, NO→variable\n"
-            # "  2. Does changing it alter event type? YES→constant, NO→variable\n"
-            # "  3. When uncertain: prefer constant (short phrases ≤3 words are usually structural)\n\n"
-            # "Examples:\n"
-            # "  Input: '2024-01-01 10:00:00 User alice connected from 192.168.1.100'\n"
-            # "  Output: '(?P<ts>.*?) User (?P<user>.*?) connected from (?P<ip>.*?)'\n"
-            # "  Constants: User, connected, from | Variables: ts, user, ip\n\n"
-            # "  Input: 'Oct 29 13:04:23 AP-403 mdns[1234]: AP sent deauth to sta 00:1A:2B:3C:4D:5E'\n"
-            # "  Output: '(?P<ts>.*?) (?P<ap>.*?) mdns\\[(?P<pid>.*?)\\]: AP sent deauth to sta (?P<mac>.*?)'\n"
-            # "  Constants: mdns, AP sent deauth to sta | Variables: ts, ap, pid, mac\n\n"
-            "Return exactly this json format:\n"
-            "{\n"
-            '  "reasoning": "<brief explanation>",\n'
-            '  "regex": "<regex with (?P<name>.*?) for ALL variables>"\n'
-            "}\n"
-        )
+        system_prompt = self._parsing_system_prompt()
 
         # Build context information
         context_parts = [f"Context: {context}"]
@@ -186,6 +150,75 @@ class ParsingAgent(BaseAgent):
             self.last_error = f"llm error: {exc}"
             self.last_raw_response = f"[LLM ERROR] {exc}"
             return None
+
+    def refine_template(
+        self,
+        *,
+        candidate_record: TemplateRecord,
+        candidate_sample: ProcessedLogLine,
+        routing: RoutingResult,
+        timestamp_spec: Optional[TimestampSpec],
+        issues: List[str],
+    ) -> Optional[TemplateRecord]:
+        """
+        Refine a previously generated template using validator feedback while
+        preserving the current LLM conversation for additional context.
+        """
+        if not issues:
+            self.last_error = "no refinement issues provided"
+            return None
+
+        prompt = self._build_refinement_prompt(
+            candidate_record=candidate_record,
+            candidate_sample=candidate_sample,
+            routing=routing,
+            timestamp_spec=timestamp_spec,
+            issues=issues,
+        )
+
+        if not self.conversation_history:
+            self.conversation_history = [
+                {"role": "system", "content": self._parsing_system_prompt()}
+            ]
+
+        self.conversation_history.append({"role": "user", "content": prompt})
+
+        try:
+            response = self.api_client.chat(self.conversation_history)
+            self.last_raw_response = response
+            self.conversation_history.append(
+                {"role": "assistant", "content": response}
+            )
+        except Exception as exc:
+            self.last_error = f"refinement error: {exc}"
+            self.last_raw_response = f"[LLM ERROR] {exc}"
+            return None
+
+        payload = self._extract_json(response)
+        if payload is None:
+            self.last_error = "could not parse refinement response"
+            return None
+
+        regex = payload.get("regex")
+        reasoning = payload.get("reasoning", "")
+        if not isinstance(regex, str) or not regex.strip():
+            self.last_error = "refinement response missing regex"
+            return None
+
+        outcome = self.build_outcome_from_regex(
+            regex=regex.strip(),
+            sample=candidate_sample,
+            routing=routing,
+            timestamp_spec=timestamp_spec,
+            reasoning=reasoning,
+            raw_response=self.last_raw_response,
+        )
+        if not outcome:
+            if not self.last_error:
+                self.last_error = "refined regex did not match sample"
+            return None
+
+        return outcome.template_record
 
 
     # ------------------------------------------------------------------ #
@@ -381,7 +414,7 @@ class ParsingAgent(BaseAgent):
 
             "1. replace_conflicting:\n"
             "   Use when the candidate template correctly identifies business variables that conflicting templates incorrectly hardcoded.\n"
-            "   Example: Conflicting templates have 'user=alice' and 'user=bob', candidate has 'user=(?P<user>.*?)'\n"
+            "   Example: Conflicting templates have 'user=alice' and 'user=bob', candidate has 'user=(?P<user>.*)'\n"
             "   Result: Delete/deactivate all conflicting templates, use the candidate template instead.\n"
             "   This merges multiple overly-specific templates into one properly generalized template.\n"
             "   WARNING: Only use this when the captured position is truly a BUSINESS VARIABLE (unbounded instance data like IPs, MACs, usernames, IDs).\n"
@@ -397,7 +430,7 @@ class ParsingAgent(BaseAgent):
 
             "2. refine_candidate:\n"
             "   Use when the candidate template is overly generalized, capturing structural constants as variables.\n"
-            "   Example: Candidate has (?P<message>.*?) capturing entire message content, while conflicting templates parse specific event structures.\n"
+            "   Example: Candidate has (?P<message>.*) capturing entire message content, while conflicting templates parse specific event structures.\n"
             "   Result: Adjust the candidate regex to be more specific (add distinguishing structural constants) so it doesn't conflict.\n"
             "   This maintains template independence by making the overly-broad regex more specific.\n\n"
             "   Return JSON:\n"
@@ -407,4 +440,76 @@ class ParsingAgent(BaseAgent):
             '  "new_regex": "the new more specific regex to use",\n'
             "}\n"
             "Respond with JSON only."
+        )
+
+    def _parsing_system_prompt(self) -> str:
+        return (
+            "You are a log parsing expert. Your task is distinguish all BUSINESS DATA and extract a unified log template:\n\n"
+            "BUSINESS DATA (Variables): Instance-specific, unbounded values\n"
+            "  • Timestamps, IPs, MACs, usernames, device names, IDs, metrics, paths\n"
+            "  • Capture as: (?P<name>.*)\n"
+            "  • Criteria: Unbounded domain, externally determined, substitution doesn't change event type\n\n"
+            "STRUCTURE (Constants) - NOT BUSINESS DATA: System-defined, finite value sets\n"
+            "  • Event skeletons: 'connected', 'timeout', 'sent deauth', 'failed to connect'\n"
+            "  • Log levels: INFO, WARN, ERROR, DEBUG\n"
+            "  • Protocol keywords: GET, POST, TCP, UDP, deauth, disassoc\n"
+            "  • Module names: kernel, sshd, mdns (Note: PIDs are variables)\n"
+            "  • Syntactic markers: from, to, by, at, delimiters like :, |, =\n"
+            "  • Keep as literal text in regex\n"
+            "  • Criteria: Finite set, system-defined, changing it changes event semantics\n\n"
+            "Requirements:\n"
+            "  • Use ONLY .* for ALL content matching. Do not use \\d+, \\w+, [0-9]+, [a-zA-Z]+ or any other specific character classes\n"
+            "  • The template must fully match the entire log\n"
+            "  • If you see JSON objects, capture them as a single variable without parsing internals\n\n"
+            "Return exactly this json format:\n"
+            "{\n"
+            '  "reasoning": "<brief explanation>",\n'
+            '  "regex": "<regex with (?P<name>.*) for ALL variables>"\n'
+            "}\n"
+        )
+
+    def _build_refinement_prompt(
+        self,
+        *,
+        candidate_record: TemplateRecord,
+        candidate_sample: ProcessedLogLine,
+        routing: RoutingResult,
+        timestamp_spec: Optional[TimestampSpec],
+        issues: List[str],
+    ) -> str:
+        context = f"Context: device_type={routing.device_type}, vendor={routing.vendor}"
+        ts_hint = (
+            f"Timestamp hint: format {timestamp_spec.format} (regex {timestamp_spec.regex})."
+            if timestamp_spec
+            else ""
+        )
+        issues_block = "\n".join(f"- {issue}" for issue in issues) or "- unspecified validator issue"
+        var_names = candidate_record.get_variable_names()
+        group_names = ", ".join(var_names) if var_names else "none"
+        instructions = (
+            "Validator feedback indicates your regex must be refined.\n"
+            "Rules:\n"
+            "  • Preserve the distinction between structural constants and business-data variables.\n"
+            "  • Keep existing capture group names; do not add or rename groups unless required.\n"
+            "  • Use only (?P<name>.*) for variables and escape literal constants.\n"
+            "  • Maintain syntactic markers (colons, pipes, brackets) unless they are clearly variable content.\n"
+            "Return JSON only:\n"
+            "{\n"
+            '  "regex": "<refined regex>",\n'
+            '  "reasoning": "<brief explanation>"\n'
+            "}\n"
+        )
+
+        return (
+            "REFINEMENT REQUEST\n"
+            f"{context}\n"
+            f"{ts_hint}\n"
+            "Validator issues:\n"
+            f"{issues_block}\n\n"
+            "Candidate template:\n"
+            f"  regex: {candidate_record.regex}\n"
+            f"  capture_groups: {group_names}\n"
+            f"  example_transformed: {candidate_sample.transformed}\n"
+            f"  example_raw: {candidate_sample.raw}\n\n"
+            f"{instructions}"
         )

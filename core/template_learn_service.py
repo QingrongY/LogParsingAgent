@@ -9,7 +9,6 @@ from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 from agents.parsing_agent import ParsingAgent, ParsingOutcome
-from agents.template_refinement_agent import TemplateRefinementAgent
 from agents.router_agent import RoutingResult
 from agents.timestamp_agent import TimestampSpec
 from core.status_reporting import ConsoleStatusReporter
@@ -29,11 +28,9 @@ class TemplateLearnService:
     def __init__(
         self,
         parsing_agent: ParsingAgent,
-        refinement_agent: Optional[TemplateRefinementAgent],
         reporter: ConsoleStatusReporter,
-    ):
+    ) -> None:
         self.parsing_agent = parsing_agent
-        self.refinement_agent = refinement_agent
         self.reporter = reporter
 
     def learn_templates(
@@ -269,7 +266,7 @@ class TemplateLearnService:
                         validation = TemplateValidationResult(
                             False, [reason], remaining_conflicts
                         )
-                elif self.refinement_agent:
+                else:
                     attempts = 0
                     while attempts < 3 and not validation.is_valid:
                         attempts += 1
@@ -280,7 +277,7 @@ class TemplateLearnService:
                             detail=f"attempt {attempts}",
                             severity="warning",
                         )
-                        refined = self.refinement_agent.refine_template(
+                        refined = self.parsing_agent.refine_template(
                             candidate_record=record,
                             candidate_sample=processed_line,
                             routing=routing,
@@ -288,7 +285,7 @@ class TemplateLearnService:
                             issues=validation.reasons,
                         )
                         if not refined:
-                            reason = self.refinement_agent.last_failure_reason
+                            reason = self.parsing_agent.last_error or "refinement failed"
                             if reason:
                                 self.reporter.emit(
                                     "refinement_failure",
@@ -297,21 +294,21 @@ class TemplateLearnService:
                                     detail=None,
                                     severity="error",
                                 )
-                                if self.refinement_agent.last_raw_response:
+                                if self.parsing_agent.last_raw_response:
                                     self.reporter.emit(
                                         "refinement_failure",
                                         line_number=line_number,
-                                        message=self.refinement_agent.last_raw_response,
+                                        message=self.parsing_agent.last_raw_response,
                                         detail="raw_response",
                                         severity="error",
                                     )
                             break
-                        if self.refinement_agent.last_raw_response:
+                        if self.parsing_agent.last_raw_response:
                             self.reporter.emit(
                                 "refinement",
                                 line_number=line_number,
                                 message="updated regex",
-                                detail=self.refinement_agent.last_raw_response,
+                                detail=self.parsing_agent.last_raw_response,
                                 severity="success",
                             )
 
