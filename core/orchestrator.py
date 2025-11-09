@@ -18,10 +18,6 @@ from agents.timestamp_agent import TimestampAgent, TimestampSpec
 from agents.parsing_agent import ParsingAgent, ParsingOutcome
 from utils.json_payloads import ProcessedLogLine, preprocess_log_line
 from utils.template_validator import TemplateValidator, TemplateValidationResult
-from agents.conflict_resolution_agent import (
-    ConflictResolutionAgent,
-    ResolutionPlan,
-)
 from agents.template_refinement_agent import TemplateRefinementAgent
 from core.status_reporting import ConsoleStatusReporter
 from core.template_learn_service import TemplateLearnService
@@ -112,10 +108,6 @@ class LogParsingOrchestrator:
         self.parsing_agent = ParsingAgent(
             api_client=self.api_client,
         )
-        self.conflict_agent = ConflictResolutionAgent(
-            api_client=self.api_client,
-            parsing_agent=self.parsing_agent,
-        )
         self.refinement_agent = TemplateRefinementAgent(
             api_client=self.api_client,
             parsing_agent=self.parsing_agent,
@@ -123,7 +115,6 @@ class LogParsingOrchestrator:
         self.reporter = ConsoleStatusReporter()
         self.learn_service = TemplateLearnService(
             parsing_agent=self.parsing_agent,
-            conflict_agent=self.conflict_agent,
             refinement_agent=self.refinement_agent,
             reporter=self.reporter,
         )

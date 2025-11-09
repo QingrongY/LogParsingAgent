@@ -40,6 +40,7 @@ class ParsingAgent(BaseAgent):
         super().__init__(api_client)
         self.last_raw_response: str = ""
         self.last_error: str = ""
+        self.conversation_history: List[Dict] = []
 
     def derive_template(
         self,
@@ -162,10 +163,27 @@ class ParsingAgent(BaseAgent):
         )
 
         user_prompt = "\n\n".join(prompt_sections)
-        result = self._call_llm(system_prompt, user_prompt, save_raw=True)
-        if result is None:
-            self.last_error = "llm error"
-        return result
+
+        # Initialize conversation history
+        self.conversation_history = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Call LLM with conversation history
+        try:
+            response = self.api_client.chat(self.conversation_history)
+            self.last_raw_response = response
+            # Add assistant response to history
+            self.conversation_history.append({"role": "assistant", "content": response})
+            result = self._extract_json(response)
+            if result is None:
+                self.last_error = "llm error"
+            return result
+        except Exception as exc:
+            self.last_error = f"llm error: {exc}"
+            self.last_raw_response = f"[LLM ERROR] {exc}"
+            return None
 
 
     # ------------------------------------------------------------------ #
@@ -307,3 +325,111 @@ class ParsingAgent(BaseAgent):
         device = routing.device_type.replace(" ", "_")
         vendor = routing.vendor.replace(" ", "_")
         return f"{device}-{vendor}-{digest}"
+
+    # ------------------------------------------------------------------ #
+    # Conflict resolution
+    # ------------------------------------------------------------------ #
+    def resolve_conflict(
+        self,
+        *,
+        initial_outcome: ParsingOutcome,
+        candidate_sample: ProcessedLogLine,
+        conflicting_records: Iterable[TemplateRecord],
+        conflicting_samples: Iterable[ProcessedLogLine],
+    ) -> Optional[Dict]:
+        """
+        Resolve conflicts with existing templates by continuing the conversation.
+
+        Returns:
+            Dict with keys: decision, new_regex, replaced_ids, reasoning
+            Or None if resolution failed
+        """
+        records = list(conflicting_records)
+        samples = list(conflicting_samples)
+
+        if not records or not samples:
+            self.last_error = "missing conflicting records or samples"
+            return None
+
+        # Build conflict prompt
+        conflict_prompt = self._build_conflict_prompt(
+            initial_outcome, candidate_sample, records, samples
+        )
+
+        # Continue the conversation
+        self.conversation_history.append({
+            "role": "user",
+            "content": conflict_prompt
+        })
+
+        try:
+            response = self.api_client.chat(self.conversation_history)
+            self.last_raw_response = response
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": response
+            })
+            result = self._extract_json(response)
+            if result is None:
+                self.last_error = "could not parse conflict resolution response"
+            return result
+        except Exception as exc:
+            self.last_error = f"conflict resolution error: {exc}"
+            self.last_raw_response = f"[LLM ERROR] {exc}"
+            return None
+
+    def _build_conflict_prompt(
+        self,
+        initial_outcome: ParsingOutcome,
+        candidate_sample: ProcessedLogLine,
+        conflicting_records: List[TemplateRecord],
+        conflicting_samples: List[ProcessedLogLine],
+    ) -> str:
+        """Build the conflict resolution prompt."""
+        conflicts_desc = "\n".join([
+            (
+                f"- template_id: {rec.template_id}\n"
+                f"  regex: {rec.regex}\n"
+                f"  example: {sample.transformed}"
+            )
+            for rec, sample in zip(conflicting_records, conflicting_samples)
+        ])
+
+        return (
+            f"CONFLICT DETECTED:\n"
+            f"Your regex pattern matches not only your example but also examples from existing templates.\n"
+            f"This creates ambiguity: the same log line could match multiple templates.\n\n"
+
+            f"Your template:\n"
+            f"  regex: {initial_outcome.template_record.regex}\n"
+            f"  example: {candidate_sample.transformed}\n"
+            f"  your reasoning: {initial_outcome.reasoning}\n\n"
+
+            f"Conflicting templates (your regex also matches their examples):\n"
+            f"{conflicts_desc}\n\n"
+
+            "Analyze the conflict and choose one decision:\n\n"
+
+            "1. replace_conflicting:\n"
+            "   Use when the candidate template correctly identifies business variables that conflicting templates incorrectly hardcoded.\n"
+            "   Example: Conflicting templates have 'user=alice' and 'user=bob', candidate has 'user=(?P<user>.*?)'\n"
+            "   Result: Delete/deactivate all conflicting templates, use the candidate template instead.\n"
+            "   This merges multiple overly-specific templates into one properly generalized template.\n"
+            "   WARNING: Only use this when the captured position is truly a BUSINESS VARIABLE (unbounded instance data like IPs, MACs, usernames, IDs).\n"
+            "   Do NOT merge if you are capturing STRUCTURAL CONSTANTS (event keywords, operation names, module names) as variables.\n\n"
+
+            "2. refine_candidate:\n"
+            "   Use when the candidate template is overly generalized, capturing structural constants as variables.\n"
+            "   Example: Candidate has (?P<message>.*?) capturing entire message content, while conflicting templates parse specific event structures.\n"
+            "   Result: Adjust the candidate regex to be more specific (add distinguishing structural constants) so it doesn't conflict.\n"
+            "   This maintains template independence by making the overly-broad regex more specific.\n\n"
+
+            "Return JSON:\n"
+            "{\n"
+            '  "reasoning": "explanation of why this decision is correct",\n'
+            '  "decision": "replace_conflicting" | "refine_candidate",\n'
+            '  "new_regex": "the regex to use (candidate as-is for replace_conflicting, or refined for refine_candidate)",\n'
+            '  "replaced_ids": ["template_id1", "template_id2"]  // ONLY for replace_conflicting, list all conflicting template IDs; empty array otherwise\n'
+            "}\n"
+            "Respond with JSON only."
+        )

@@ -9,7 +9,6 @@ from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 from agents.parsing_agent import ParsingAgent, ParsingOutcome
-from agents.conflict_resolution_agent import ConflictResolutionAgent, ResolutionPlan
 from agents.template_refinement_agent import TemplateRefinementAgent
 from agents.router_agent import RoutingResult
 from agents.timestamp_agent import TimestampSpec
@@ -30,12 +29,10 @@ class TemplateLearnService:
     def __init__(
         self,
         parsing_agent: ParsingAgent,
-        conflict_agent: Optional[ConflictResolutionAgent],
         refinement_agent: Optional[TemplateRefinementAgent],
         reporter: ConsoleStatusReporter,
     ):
         self.parsing_agent = parsing_agent
-        self.conflict_agent = conflict_agent
         self.refinement_agent = refinement_agent
         self.reporter = reporter
 
@@ -154,7 +151,7 @@ class TemplateLearnService:
                 )
 
             if not validation.is_valid:
-                if conflict_pairs and self.conflict_agent:
+                if conflict_pairs and outcome:
                     attempts = 0
                     while attempts < 3 and not validation.is_valid:
                         attempts += 1
@@ -184,17 +181,14 @@ class TemplateLearnService:
                                 severity="warning",
                             )
 
-                        plan = self.conflict_agent.resolve_conflict(
-                            candidate_record=record,
+                        resolution_dict = self.parsing_agent.resolve_conflict(
+                            initial_outcome=outcome,
                             candidate_sample=processed_line,
-                            routing=routing,
-                            timestamp_spec=timestamp_spec,
                             conflicting_records=[pair[0] for pair in conflict_pairs],
                             conflicting_samples=[pair[1] for pair in conflict_pairs],
-                            issues=validation.reasons,
                         )
-                        if not plan:
-                            reason = self.conflict_agent.last_failure_reason
+                        if not resolution_dict:
+                            reason = self.parsing_agent.last_error
                             if reason:
                                 self.reporter.emit(
                                     "conflict_failure",
@@ -203,20 +197,20 @@ class TemplateLearnService:
                                     detail=None,
                                     severity="error",
                                 )
-                                if self.conflict_agent.last_raw_response:
+                                if self.parsing_agent.last_raw_response:
                                     self.reporter.emit(
                                         "conflict_plan",
                                         line_number=line_number,
-                                        message=self.conflict_agent.last_raw_response,
+                                        message=self.parsing_agent.last_raw_response,
                                         detail="raw_response",
                                         severity="warning",
                                     )
                             break
-                        if self.conflict_agent.last_raw_response:
+                        if self.parsing_agent.last_raw_response:
                             self.reporter.emit(
                                 "conflict_plan",
                                 line_number=line_number,
-                                message=self.conflict_agent.last_raw_response,
+                                message=self.parsing_agent.last_raw_response,
                                 detail="proposal",
                                 severity="info",
                             )
@@ -225,7 +219,7 @@ class TemplateLearnService:
                             pair[0].template_id for pair in conflict_pairs
                         ]
                         record, validation, resolved_via_existing, resolution_note = self._apply_resolution_plan(
-                            plan=plan,
+                            plan=resolution_dict,
                             record=record,
                             processed_line=processed_line,
                             library=library,
@@ -469,7 +463,7 @@ class TemplateLearnService:
     def _apply_resolution_plan(
         self,
         *,
-        plan: ResolutionPlan,
+        plan: Dict,
         record: TemplateRecord,
         processed_line: ProcessedLogLine,
         library: TemplateLibrary,
@@ -483,26 +477,30 @@ class TemplateLearnService:
         """
         Apply conflict resolution plan.
 
+        Args:
+            plan: Dict with keys: decision, new_regex, replaced_ids, reasoning
+
         Returns:
             Tuple of (record, validation, resolved_via_existing, status_note)
         """
-        if plan.reasoning:
+        reasoning = plan.get("reasoning", "")
+        if reasoning:
             self.reporter.emit(
                 "resolution",
                 line_number=line_number,
-                message=plan.reasoning,
+                message=reasoning,
                 detail=None,
             )
 
-        new_record = self.conflict_agent.build_record_from_regex(
-            regex=plan.new_template_regex,
+        new_outcome = self.parsing_agent.build_outcome_from_regex(
+            regex=plan.get("new_regex", ""),
             sample=processed_line,
             routing=routing,
             timestamp_spec=timestamp_spec,
-            reasoning=plan.new_template_notes,
-            raw_response=self.conflict_agent.last_raw_response,
+            reasoning=reasoning,
+            raw_response=self.parsing_agent.last_raw_response,
         )
-        if not new_record:
+        if not new_outcome:
             reason = "failed to build template from resolution"
             return (
                 record,
@@ -511,8 +509,12 @@ class TemplateLearnService:
                 f"resolution failed: {reason}",
             )
 
-        if plan.decision == "replace_conflicting":
-            for template_id in plan.replaced_template_ids:
+        new_record = new_outcome.template_record
+        decision = plan.get("decision", "")
+
+        if decision == "replace_conflicting":
+            replaced_ids = plan.get("replaced_ids", [])
+            for template_id in replaced_ids:
                 if template_id in library.templates:
                     library.templates[template_id].is_active = False
                     library._dirty_since_save = True
@@ -529,7 +531,7 @@ class TemplateLearnService:
                 new_record,
                 candidate_sample=processed_line,
             )
-            status_note = f"replaced {len(plan.replaced_template_ids)} conflicting templates"
+            status_note = f"replaced {len(replaced_ids)} conflicting templates"
             return new_record, validation, False, status_note
 
         # decision == "refine_candidate"
