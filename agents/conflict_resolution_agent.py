@@ -3,11 +3,11 @@ Conflict resolution agent that can either adjust the candidate regex or update
 conflicting templates when a newly learned pattern collides with existing ones.
 """
 
-from dataclasses import dataclass
-import json
+from dataclasses import dataclass, field
 import re
 from typing import Iterable, List, Optional
 
+from agents.base_agent import BaseAgent
 from utils.json_payloads import ProcessedLogLine
 from agents.parsing_agent import ParsingAgent
 from agents.router_agent import RoutingResult
@@ -16,26 +16,19 @@ from agents.timestamp_agent import TimestampSpec
 
 
 @dataclass
-class ExistingUpdate:
-    template_id: str
-    regex: str
-    notes: str = ""
-
-
-@dataclass
 class ResolutionPlan:
-    decision: str  # update_existing | adjust_candidate
-    existing_updates: List[ExistingUpdate]
-    candidate_regex: Optional[str] = None
-    candidate_notes: str = ""
+    decision: str  # replace_conflicting | refine_candidate
+    new_template_regex: str
+    new_template_notes: str = ""
+    replaced_template_ids: List[str] = field(default_factory=list)
     reasoning: str = ""
 
 
-class ConflictResolutionAgent:
+class ConflictResolutionAgent(BaseAgent):
     """Uses the LLM to propose conflict resolution plans."""
 
     def __init__(self, api_client, parsing_agent: ParsingAgent) -> None:
-        self.api_client = api_client
+        super().__init__(api_client)
         self.parsing_agent = parsing_agent
         self.last_raw_response: str = ""
         self.last_failure_reason: str = ""
@@ -74,25 +67,11 @@ class ConflictResolutionAgent:
             issues=issues,
         )
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a log parsing architect. Resolve conflicts while preserving variable semantics. "
-                    "Respond with JSON only."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-
-        try:
-            response = self.api_client.chat(messages)
-            self.last_raw_response = response
-        except Exception as exc:
-            self.last_failure_reason = f"llm request failed: {exc}"
-            return None
-
-        payload = self._extract_json(response)
+        system_prompt = (
+            "You are a log parsing architect. Resolve conflicts while preserving variable semantics. "
+            "Respond with JSON only."
+        )
+        payload = self._call_llm(system_prompt, prompt, save_raw=True)
         if not payload:
             self.last_failure_reason = "could not parse LLM response"
             return None
@@ -166,34 +145,35 @@ class ConflictResolutionAgent:
             issues_section = "Issues to address:\n" + "\n".join(f"  • {msg}" for msg in issues) + "\n\n"
 
         instructions = (
-            "Resolve this conflict by choosing exactly one decision:\n"
-            "  • update_existing: revise the conflicting templates so they now match this candidate log while preserving their original intent. "
-            "In most cases this means relaxing overly specific literals into variable captures so the existing template can absorb the new log.\n"
-            "After these updates the candidate regex will be discarded.\n"
-            "  • adjust_candidate: refine only the candidate regex so it no longer conflicts but still captures the candidate log semantics.\n"
-            "  • discard_candidate: keep all existing templates unchanged and reject the candidate template.\n"
+            "Analyze the conflict and choose one decision:\n\n"
+            "1. replace_conflicting:\n"
+            "   Use when the candidate template correctly identifies business variables that conflicting templates incorrectly hardcoded.\n"
+            "   Example: Conflicting templates have 'user=alice' and 'user=bob', candidate has 'user=(?P<user>.*?)'\n"
+            "   Result: Delete/deactivate all conflicting templates, use the candidate template instead.\n"
+            "   This merges multiple overly-specific templates into one properly generalized template.\n\n"
+            "2. refine_candidate:\n"
+            "   Use when conflicting templates represent distinct event types/variants that should remain separate.\n"
+            "   Example: Conflicting templates have different suffixes/prefixes that are structural, not variable.\n"
+            "   Result: Adjust the candidate regex to be more specific (add distinguishing structural constants) so it doesn't conflict.\n"
+            "   This maintains template independence by making the new template capture a distinct variant.\n\n"
             "Rules:\n"
-            "  • BUSINESS DATA (variables): Instance-specific, unbounded values such as timestamps, IPs, MACs, usernames, device names, IDs, metrics, paths, messages.\n"
-            "    - Capture them with (?P<name>.*?) and keep the group semantics consistent.\n"
-            "  • STRUCTURE (constants): System-defined phrases (event verbs, log levels, module names, protocol keywords, delimiters).\n"
-            "    - These are short phrases that determine the event type; changing them alters semantics, so keep them literal and escape regex metacharacters.\n"
-            "  • Keep structural constants literal and treat business data as variables.\n"
-            "    - Constants are small, system-defined phrases that determine the event type.\n"
-            "    - Variables are instance-specific values such as timestamps, IPs, MACs, IDs, names.\n"
-            "  • When you claim update_existing, the revised regex must differ from the original and actually cover the candidate log; otherwise choose discard_candidate.\n"
-            "  • Maintain capture group names and semantics; avoid renaming groups unless mandated by the examples.\n"
-            "  • Use only (?P<name>.*?) for variables and escape constants properly.\n"
-            "  • Do NOT hardcode example-specific values (such as literal IDs, paths, or hostnames) into constants unless the examples prove they are structural.\n"
-            "  • When you choose update_existing, provide revised regexes for every template that must change, and ensure the candidate log will match at least one of them afterwards.\n"
-            "  • When you choose adjust_candidate, provide a single revised candidate regex that resolves the conflict while preserving variable semantics.\n"
+            "  • BUSINESS DATA (variables): Instance-specific unbounded values (timestamps, IPs, MACs, usernames, IDs, paths).\n"
+            "    Capture with (?P<name>.*?)\n"
+            "  • STRUCTURE (constants): System-defined phrases that determine event type (log levels, event verbs, module names, keywords).\n"
+            "    Keep literal and escape regex metacharacters.\n"
+            "  • When choosing replace_conflicting, the candidate regex must match all conflicting template examples.\n"
+            "  • When choosing refine_candidate, add structural constants to distinguish the candidate from conflicting templates.\n\n"
             "Return JSON:\n"
             "{\n"
-            '  "reasoning": "...",\n'
-            '  "decision": "update_existing" | "adjust_candidate" | "discard_candidate",\n'
-            '  "updated_existing": [{"template_id": "...", "regex": "...", "notes": "..."}],\n'
-            '  "updated_candidate": {"regex": "...", "notes": "..."}\n'
+            '  "reasoning": "explanation of why this decision is correct",\n'
+            '  "decision": "replace_conflicting" | "refine_candidate",\n'
+            '  "new_template": {\n'
+            '    "regex": "the regex to use (candidate as-is for replace_conflicting, or refined for refine_candidate)",\n'
+            '    "notes": "brief description of changes"\n'
+            "  },\n"
+            '  "replaced_templates": ["template_id1", "template_id2"]  // ONLY for replace_conflicting, list all conflicting template IDs\n'
             "}\n"
-            "Omit updated_existing when no template updates are needed, omit updated_candidate when update_existing is chosen, and leave both empty when discard_candidate is chosen. Respond with JSON only."
+            "Respond with JSON only."
         )
 
         return (
@@ -212,18 +192,6 @@ class ConflictResolutionAgent:
             f"{instructions}"
         )
 
-    @staticmethod
-    def _extract_json(text: str) -> Optional[dict]:
-        try:
-            cleaned = text.strip()
-            if cleaned.startswith("{"):
-                return json.loads(cleaned)
-            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-        except json.JSONDecodeError:
-            return None
-        return None
 
     @staticmethod
     def _normalize(value: Optional[str]) -> str:
@@ -233,53 +201,33 @@ class ConflictResolutionAgent:
 
     def _parse_plan(self, payload: dict) -> Optional[ResolutionPlan]:
         decision = self._normalize(payload.get("decision"))
-        if decision not in {"update_existing", "adjust_candidate", "discard_candidate"}:
+        if decision not in {"replace_conflicting", "refine_candidate"}:
             return None
 
-        existing_updates: List[ExistingUpdate] = []
-        for item in payload.get("updated_existing", []):
-            template_id = item.get("template_id")
-            regex = item.get("regex")
-            notes = item.get("notes", "")
-            if not template_id or not isinstance(regex, str) or not regex.strip():
-                return None
-            if notes is None:
-                notes = ""
-            elif not isinstance(notes, str):
-                notes = str(notes)
-            existing_updates.append(
-                ExistingUpdate(
-                    template_id=template_id,
-                    regex=regex.strip(),
-                    notes=notes,
-                )
-            )
+        new_template = payload.get("new_template", {})
+        new_regex = new_template.get("regex")
+        new_notes = new_template.get("notes", "")
 
-        candidate_section = payload.get("updated_candidate") or {}
-        candidate_regex = candidate_section.get("regex")
-        candidate_notes = candidate_section.get("notes", "")
-        if candidate_notes is None:
-            candidate_notes = ""
-        elif not isinstance(candidate_notes, str):
-            candidate_notes = str(candidate_notes)
-        if decision == "update_existing":
-            if not existing_updates:
+        if not isinstance(new_regex, str) or not new_regex.strip():
+            return None
+
+        if not isinstance(new_notes, str):
+            new_notes = str(new_notes) if new_notes else ""
+
+        replaced_ids = []
+        if decision == "replace_conflicting":
+            replaced_ids = payload.get("replaced_templates", [])
+            if not replaced_ids or not isinstance(replaced_ids, list):
                 return None
-            candidate_regex_value: Optional[str] = None
-        elif decision == "adjust_candidate":
-            if not isinstance(candidate_regex, str) or not candidate_regex.strip():
-                return None
-            candidate_regex_value = candidate_regex.strip()
-        else:  # discard_candidate
-            if existing_updates or candidate_regex:
-                return None
-            candidate_regex_value = None
 
         reasoning = payload.get("reasoning", "")
+        if not isinstance(reasoning, str):
+            reasoning = ""
+
         return ResolutionPlan(
             decision=decision,
-            existing_updates=existing_updates,
-            candidate_regex=candidate_regex_value,
-            candidate_notes=candidate_notes,
+            new_template_regex=new_regex.strip(),
+            new_template_notes=new_notes,
+            replaced_template_ids=replaced_ids,
             reasoning=reasoning,
         )

@@ -3,10 +3,10 @@ Agent responsible for fixing validation issues on freshly generated templates
 when no conflicts with existing templates are present.
 """
 
-import json
 import re
 from typing import List, Optional
 
+from agents.base_agent import BaseAgent
 from utils.json_payloads import ProcessedLogLine
 from agents.parsing_agent import ParsingAgent
 from agents.router_agent import RoutingResult
@@ -14,11 +14,11 @@ from libraries.template_library import TemplateRecord
 from agents.timestamp_agent import TimestampSpec
 
 
-class TemplateRefinementAgent:
+class TemplateRefinementAgent(BaseAgent):
     """Uses the LLM to refine a single candidate template so it satisfies validators."""
 
     def __init__(self, api_client, parsing_agent: ParsingAgent) -> None:
-        self.api_client = api_client
+        super().__init__(api_client)
         self.parsing_agent = parsing_agent
         self.last_raw_response: str = ""
         self.last_failure_reason: str = ""
@@ -51,26 +51,12 @@ class TemplateRefinementAgent:
             issues=issues,
         )
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a log parsing engineer. Refine the provided regex so it satisfies "
-                    "validator requirements while preserving the structural vs variable boundary. "
-                    "Respond with JSON only."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-
-        try:
-            response = self.api_client.chat(messages)
-            self.last_raw_response = response
-        except Exception as exc:
-            self.last_failure_reason = f"llm request failed: {exc}"
-            return None
-
-        payload = self._extract_json(response)
+        system_prompt = (
+            "You are a log parsing engineer. Refine the provided regex so it satisfies "
+            "validator requirements while preserving the structural vs variable boundary. "
+            "Respond with JSON only."
+        )
+        payload = self._call_llm(system_prompt, prompt, save_raw=True)
         if not payload:
             self.last_failure_reason = "could not parse refinement response"
             return None
@@ -164,15 +150,3 @@ class TemplateRefinementAgent:
             return None
         return outcome.template_record
 
-    @staticmethod
-    def _extract_json(text: str) -> Optional[dict]:
-        try:
-            cleaned = text.strip()
-            if cleaned.startswith("{"):
-                return json.loads(cleaned)
-            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-        except json.JSONDecodeError:
-            return None
-        return None

@@ -16,14 +16,13 @@ This system uses LLM agents to make this distinction semantically, not heuristic
 - **RouterAgent**: Identifies log source (device type, vendor)
 - **TimestampAgent**: Infers timestamp format
 - **ParsingAgent**: Derives templates using LLM semantic analysis
-- **EnumerationAnalysisAgent**: Classifies variables as closed enumerations or open domains
 - **JSONPayloadPreprocessor**: Detects inline JSON-like payloads, replaces them with placeholders, and captures structured key metadata for downstream processing
 - **TemplateValidator**: Performs conflict checks before new templates enter the library
+- **ConflictResolutionAgent**: Resolves template conflicts
+- **TemplateRefinementAgent**: Refines templates to meet validation requirements
 
 ### Key Components
 - **TemplateLibrary**: Persistent storage of learned templates per device/vendor
-- **TerminologyLibrary**: Canonical variable naming
-- **EnumerationLibrary**: LLM-based variable classification
 
 ## Installation
 
@@ -50,9 +49,9 @@ python cli.py /path/to/logfile.log --output-dir ./results
 
 ## Output
 
-- `*.parsed.jsonl`: Structured parsing results with extracted variables
-- Each record now includes a `json_payloads` array detailing placeholder-bound payloads, extracted keys, and normalized JSON (when available)
-- `*.templates.json`: Learned templates and enumeration metadata
+- `*.parsed.json`: Structured parsing results with extracted variables
+- Each record includes a `json_payloads` array detailing placeholder-bound payloads, extracted keys, and normalized JSON (when available)
+- `*.templates.json`: Learned templates with metadata
 
 ## Example
 

@@ -8,15 +8,13 @@ This agent distinguishes between:
 
 from dataclasses import dataclass
 import hashlib
-import json
 import re
 from typing import Dict, Iterable, List, Optional, Set
 
+from agents.base_agent import BaseAgent
 from agents.router_agent import RoutingResult
 from libraries.template_library import TemplateRecord
-from libraries.terminology import TerminologyLibrary
 from agents.timestamp_agent import TimestampSpec
-from libraries.enumeration_library import EnumerationLibrary
 from utils.json_payloads import ProcessedLogLine
 
 
@@ -29,25 +27,17 @@ class ParsingOutcome:
     raw_response: str = ""
 
 
-class ParsingAgent:
+class ParsingAgent(BaseAgent):
     """
     Responsible for deriving parsing templates via LLM or heuristic hints.
 
-    The agent enforces terminology consistency by funnelling all variable names
-    through the shared terminology library, and distinguishes between:
+    The agent uses LLM to distinguish between:
     - Business data variables (open domain)
-    - Structural enumerations (closed domain)
+    - Structural elements (closed domain)
     """
 
-    def __init__(
-        self,
-        api_client,
-        terminology_library: TerminologyLibrary,
-        enumeration_library: EnumerationLibrary,
-    ) -> None:
-        self.api_client = api_client
-        self.terminology_library = terminology_library
-        self.enumeration_library = enumeration_library
+    def __init__(self, api_client) -> None:
+        super().__init__(api_client)
         self.last_raw_response: str = ""
         self.last_error: str = ""
 
@@ -68,7 +58,7 @@ class ParsingAgent:
             return None
         sample_texts = [sample.transformed for sample in samples]
         self.last_error = ""
-        payload = self._call_llm(sample_texts, routing, timestamp_spec, feedback=feedback)
+        payload = self._call_parsing_llm(sample_texts, routing, timestamp_spec, feedback=feedback)
         raw_response = self.last_raw_response
         if not payload:
             if not self.last_error:
@@ -99,7 +89,7 @@ class ParsingAgent:
     # ------------------------------------------------------------------ #
     # LLM interaction
     # ------------------------------------------------------------------ #
-    def _call_llm(
+    def _call_parsing_llm(
         self,
         samples: List[str],
         routing: RoutingResult,
@@ -107,9 +97,6 @@ class ParsingAgent:
         *,
         feedback: Optional[str] = None,
     ) -> Optional[Dict]:
-        if not self.api_client:
-            self.last_error = "no api client"
-            return None
         context = f"device_type={routing.device_type}, vendor={routing.vendor}"
         timestamp_hint = ""
         if timestamp_spec:
@@ -118,17 +105,7 @@ class ParsingAgent:
                 f"and format {timestamp_spec.format}. "
             )
 
-        # Get known enumerations for context
-        known_enums = self.enumeration_library.get_all_closed_enumerations()
-        enum_hint = ""
-        if known_enums:
-            enum_examples = ", ".join(
-                f"{k}={{{','.join(list(v)[:3])}}}"
-                for k, v in list(known_enums.items())[:5]
-            )
-            enum_hint = f"Known enumerations: {enum_examples}. "
-
-        instructions = (
+        system_prompt = (
             "You are a log parsing expert. Distinguish between:\n\n"
             "TYPE 1 - BUSINESS DATA (Variables): Instance-specific, unbounded values\n"
             "  • Timestamps, IPs, MACs, usernames, device names, IDs, metrics, paths, messages\n"
@@ -163,18 +140,15 @@ class ParsingAgent:
             "  • Escape regex special chars in constants: [ ] ( ) { } . * + ? ^ $ \\ |\n"
             "  • Return only valid JSON, no markdown\n"
         )
+
         # Build context information
         context_parts = [f"Context: {context}"]
         if timestamp_hint:
             context_parts.append(f"Timestamp hint: {timestamp_hint}")
-        if enum_hint:
-            context_parts.append(enum_hint)
-
-        context_str = "\n".join(context_parts) if context_parts else ""
 
         prompt_sections: List[str] = []
-        if context_str:
-            prompt_sections.append(context_str)
+        if context_parts:
+            prompt_sections.extend(context_parts)
         if feedback:
             prompt_sections.append(
                 "Feedback: Previous attempt produced an invalid template. "
@@ -187,35 +161,12 @@ class ParsingAgent:
             "structural elements (branches). Return ONLY the JSON object."
         )
 
-        messages = [
-            {"role": "system", "content": instructions},
-            {
-                "role": "user",
-                "content": "\n\n".join(section for section in prompt_sections if section),
-            },
-        ]
+        user_prompt = "\n\n".join(prompt_sections)
+        result = self._call_llm(system_prompt, user_prompt, save_raw=True)
+        if result is None:
+            self.last_error = "llm error"
+        return result
 
-        try:
-            raw = self.api_client.chat(messages)
-            self.last_raw_response = raw
-        except Exception as exc:
-            self.last_raw_response = f"[LLM ERROR] {exc}"
-            self.last_error = f"llm error: {exc}"
-            return None
-        return self._extract_json(raw)
-
-    @staticmethod
-    def _extract_json(text: str) -> Optional[Dict]:
-        try:
-            cleaned = text.strip()
-            if cleaned.startswith("{"):
-                return json.loads(cleaned)
-            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-        except json.JSONDecodeError:
-            return None
-        return None
 
     # ------------------------------------------------------------------ #
     # Outcome builder
@@ -271,38 +222,18 @@ class ParsingAgent:
 
         for _, _, name in spans:
             example = match.group(name)
-            candidate = name
 
-            # Resolve canonical name through terminology library
-            entry = self.terminology_library.resolve(
-                candidate,
-                description="",
-                example=example,
-                context="",
-            )
-            canonical_name = entry.canonical_name
-            if canonical_name != candidate:
-                template_text = template_text.replace(f"<{candidate}>", f"<{canonical_name}>")
-
-            # Observe variable in enumeration library for LLM-based classification
-            self.enumeration_library.observe_variable(canonical_name, example)
-
-            is_enum = self.enumeration_library.is_closed_enumeration(canonical_name)
             variables.append(
                 {
-                    "name": canonical_name,
+                    "name": name,
                     "description": "",
                     "example": example,
-                    "is_enumeration": is_enum,
                 }
             )
-            variable_details[canonical_name] = {
+            variable_details[name] = {
                 "description": "",
                 "example": example,
-                "is_enumeration": is_enum,
             }
-            if canonical_name != candidate:
-                new_terms.append(canonical_name)
 
         # Extract constants from template by finding text between variables
         constants = self._extract_constants(template_text)
