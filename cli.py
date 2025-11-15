@@ -8,7 +8,7 @@ from pathlib import Path
 from core.orchestrator import LogParsingOrchestrator
 
 DEFAULTS = {
-    "log_path": Path("datasets/HS/HS_full.log"),
+    "log_path": Path("datasets/Wilson/Wilson_full.log"),
     "config": Path("config.json"),
     "model": "gemini-2.0-flash",
 }
